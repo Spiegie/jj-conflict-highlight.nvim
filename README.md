@@ -1,3 +1,5 @@
+# ⚠️ plugin is broken right now
+
 # jj-conflict-highlight.nvim
 A plugin to visualise jujutsu conflicts in neovim
 
