@@ -6,37 +6,71 @@ local M = {}
 
 local bit = require('bit')
 
-local NAMESPACE = api.nvim_create_namespace('jj-conflict')
+---@class Range
+---@field start integer
+---@field finish integer
+
+---@class ConflictGitStyle
+---@field start_marker integer
+---@field ancestor? Range
+---@field ancestor_marker? integer
+---@field current Range
+---@field middle_marker integer
+---@field incoming Range
+---@field finish_marker integer
+
+---@class ConflictJjStyle
+---@field start_marker integer
+---@field diff_marker? integer
+---@field diff? Range
+---@field base_marker integer
+---@field base Range
+---@field snapshot_markers integer[]
+---@field snapshots Range[]
+---@field finish_marker integer
+
+local NAMESPACE = api.nvim_create_namespace('jj-conflict-highlight')
 local PRIORITY = vim.highlight.priorities.user
 
 local sep = package.config:sub(1,1)
 
 -- Default regex markers (covers common Jujutsu variants and Git-like markers)
 local MARKERS = {
-  header = '^%%%%%%',         -- jj conflict header (e.g. "%%%%%% conflict ...")
-  start = '^<<<<<<<',         -- start of a side
-  ancestor = '^|||||||',      -- ancestor/base marker
-  middle = '^=======',        -- divider between sides
-  finish = '^>>>>>>>',        -- end of conflict
+  start = '^<<<<<<<+',         -- start of a side
+  diff = '^%%%%%%%%%%%%%%+',           -- jj conflict header (e.g. "%%%%%% conflict ...")
+  base = '^-------+',          -- start of a side
+  ancestor = '^|||||||+',      -- ancestor/base marker
+  middle = '^=======+',        -- divider between sides
+  snapshot = '^++++++++',      -- snapshot
+  finish = '^>>>>>>>+',        -- end of conflict
 }
 
 -- Highlight group names used internally
 local CURRENT_HL = 'JjConflictCurrent'
 local INCOMING_HL = 'JjConflictIncoming'
 local ANCESTOR_HL = 'JjConflictAncestor'
+local DIFF_HL = 'JjConflictDiff'
+local SNAPSHOT_HL = 'JjConflictSnapshot'
+local BASE_HL = 'JjConflictBase'
 local CURRENT_LABEL_HL = 'JjConflictCurrentLabel'
 local INCOMING_LABEL_HL = 'JjConflictIncomingLabel'
 local ANCESTOR_LABEL_HL = 'JjConflictAncestorLabel'
+local SNAPSHOT_LABEL_HL = 'JjConflictSnapshotLabel'
+local BASE_LABEL_HL = 'JjConflictBaseLabel'
 
 local DEFAULT_HLS = {
   current = 'DiffText',
   incoming = 'DiffAdd',
   ancestor = 'DiffChange',
+  snapshot = 'DiffSnapshot',
+  base = 'DiffBase',
 }
 
 local DEFAULT_CURRENT_BG_COLOR = 4218238  -- #405d7e
 local DEFAULT_INCOMING_BG_COLOR = 3229523 -- #314753
 local DEFAULT_ANCESTOR_BG_COLOR = 6824314 -- #68217A
+local DEFAULT_SNAPSHOT_BG_COLOR = 6824314 -- #68217A
+local DEFAULT_BASE_BG_COLOR = 6824314 -- #68217A
 
 -- Small util to read the full buffer lines
 local function get_buf_lines(bufnr)
@@ -44,92 +78,80 @@ local function get_buf_lines(bufnr)
   return api.nvim_buf_get_lines(bufnr, 0, -1, false)
 end
 
--- Detect conflicts in the buffer lines. Returns list of positions.
--- Each position has: current = {range_start, range_end, content_start, content_end}
--- incoming = {..} and optional ancestor = {..}
+
 local function detect_conflicts(lines)
   local positions = {}
-  local i = 1
-  local n = #lines
+  local position = {}
+  local has_start = false
+  local regionstart = 0
+  local regiontype = ""
+  local conflict_style = ""
 
-  while i <= n do
-    local line = lines[i]
-    -- detect start either by header or by <<<<<<< marker
-    local is_header = line and line:match(MARKERS.header)
-    local is_start = line and line:match(MARKERS.start)
+  for i, line in ipairs(lines) do
+    -- detect start by <<<<<<< marker
 
-    if is_header or is_start then
-      -- We found a conflict block. We'll scan forward to find middle and finish.
-      local block_start = i - 1 -- zero-based
-      local current_start, current_end, ancestor_start, ancestor_end, middle_line, incoming_start, incoming_end
-      local j = i + 1
-      local seen_ancestor = false
-      local seen_middle = false
+    if line:match(MARKERS.start) then
+      has_start = true
+      position.start_marker = i
+      -- We found a conflict block. 
+      -- look ahead, if lines[i+1] is diff or snapshot marker
+      if lines[i+1]:match(MARKERS.diff) then
+        position.snapshot_markers = {}
+        position.snapshots = {}
+        position.diff = {}
+        conflict_style = "jj_diff"
+      elseif lines[i+1]:match(MARKERS.snapshot) then
+        position.snapshot_markers = {}
+        position.snapshots = {}
+        position.base = {}
+        conflict_style = "jj_snapshot"
+      else
 
-      -- If there was a header line (%%%%%), the actual side markers might follow. We'll treat
-      -- header as part of the conflict block and continue scanning for <<<<<<< or ======= etc.
-      while j <= n do
-        local lj = lines[j]
-        if not seen_middle and lj:match(MARKERS.ancestor) then
-          -- ancestor/base section begins here. Set current end just before ancestor.
-          seen_ancestor = true
-          -- current content ends at line before ancestor
-          current_end = j - 2 -- content end (0-based)
-          ancestor_start = j - 1
-        elseif not seen_middle and lj:match(MARKERS.middle) then
-          seen_middle = true
-          middle_line = j - 1
-          if not seen_ancestor then
-            -- current ends before middle
-            current_end = j - 2
-          else
-            -- ancestor ends before middle
-            ancestor_end = j - 2
-          end
-          incoming_start = j
-        elseif lj:match(MARKERS.finish) then
-          -- end of block
-          incoming_end = j - 2
-          -- fill defaults if some values nil
-          if not current_start then current_start = block_start end
-          if not current_end then current_end = (seen_ancestor and (ancestor_start - 1) or (middle_line and middle_line - 1 or incoming_end)) end
-          if seen_ancestor and not ancestor_end then ancestor_end = (middle_line and middle_line - 1 or incoming_end) end
-          if not incoming_start then incoming_start = middle_line and (middle_line + 1) or (current_end + 2) end
-
-          table.insert(positions, {
-            current = {
-              range_start = current_start,
-              range_end = current_end,
-              content_start = current_start + 1,
-              content_end = current_end,
-            },
-            incoming = {
-              range_start = incoming_start,
-              range_end = incoming_end,
-              content_start = incoming_start + 1,
-              content_end = incoming_end,
-            },
-            ancestor = (seen_ancestor and {
-              range_start = ancestor_start,
-              range_end = ancestor_end,
-              content_start = ancestor_start + 1,
-              content_end = ancestor_end,
-            } or {}),
-            markers = { start = block_start, middle = middle_line or -1, finish = j - 1 },
-          })
-
-          i = j + 1
-          break
-        end
-        j = j + 1
+        conflict_style = "git_style"
       end
-    else
-      i = i + 1
+    end
+    if has_start and line:match(MARKERS.snapshot) and ( conflict_style == "jj_snapshot" or conflict_style == "jj_diff" ) then
+      table.insert(position.snapshot_markers, i)
+      if regionstart ~= 0 and regiontype == "base" and regionstart ~= i then
+        position.base = {start = regionstart, finish = i-1}
+      end
+      if regionstart ~= 0 and regiontype == "diff" and regionstart ~= i then
+        position.diff = {start = regionstart, finish = i-1}
+      end
+      if regionstart ~= 0 and regiontype == "snapshot" and regionstart ~= i then
+        table.insert(position.snapshots, {start = regionstart, finish = i-1})
+      end
+      regionstart = i+1
+      regiontype = "snapshot"
+    end
+    if has_start and line:match(MARKERS.base) and conflict_style == "jj_snapshot" then
+      position.base_marker = i
+      if regionstart ~= 0 and regiontype == "snapshot" and regionstart ~= i then
+        table.insert(position.snapshots, {start = regionstart, finish = i-1})
+      end
+      regionstart = i+1
+      regiontype = "base"
+    end
+    if has_start and line:match(MARKERS.diff) and conflict_style == "jj_diff" then
+      position.diff_marker = i
+      regionstart = i+1
+      regiontype = "diff"
+    end
+    if has_start and line:match(MARKERS.finish) then
+      position.finish_marker = i
+      if regionstart ~= 0 and regiontype == "snapshot" and regionstart ~= i then
+        table.insert(position.snapshots, {start = regionstart, finish = i-1})
+      end
+      position.conflict_style = conflict_style
+      table.insert(positions, position)
+      has_start = false
+      position = {}
+      regionstart = 0
     end
   end
-
   return positions
 end
+
 
 -- Helper to set extmark for a range with highlight.
 local function hl_range(bufnr, hl, range_start, range_end)
@@ -166,27 +188,58 @@ local function highlight_conflicts(bufnr, positions, lines)
   api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
 
   for _, pos in ipairs(positions) do
-    local current_start = pos.current.range_start
-    local current_end = pos.current.range_end
-    local incoming_start = pos.incoming.range_start
-    local incoming_end = pos.incoming.range_end
+--    local current_start = pos.current.range_start
+--    local current_end = pos.current.range_end
+--    local incoming_start = pos.incoming.range_start
+--    local incoming_end = pos.incoming.range_end
+--
+--    -- create extmarks
+--    local curr_id = hl_range(bufnr, CURRENT_HL, current_start, current_end + 1)
+--    local inc_id = hl_range(bufnr, INCOMING_HL, incoming_start, incoming_end + 1)
+--
+--    if not vim.tbl_isempty(pos.ancestor or {}) then
+--      local ancestor_start = pos.ancestor.range_start
+--      local ancestor_end = pos.ancestor.range_end
+--      local id = hl_range(bufnr, ANCESTOR_HL, ancestor_start + 1, ancestor_end + 1)
+--    end
+    -- highlight markers
+    -- snapshotmarker
+    if pos.snapshot_markers ~= nil then
+      for _, snapshot_marker in ipairs(pos.snapshot_markers) do
+        local snapshot_marker_id = hl_range(bufnr, ANCESTOR_HL, snapshot_marker-1, snapshot_marker)
+      end
+    end
+    -- basemarker
+    if pos["base_marker"] ~= nil then
+      local base_marker_id = hl_range(bufnr, ANCESTOR_HL, pos.base_marker-1, pos.base_marker)
+    end
+    -- diffmarker
+    if pos["diff_marker"] ~= nil then
+      local diff_marker_id = hl_range(bufnr, ANCESTOR_HL, pos.diff_marker-1, pos.diff_marker)
+    end
+    -- startmarker
+    local start_marker_id = hl_range(bufnr, ANCESTOR_HL, pos.start_marker-1, pos.start_marker)
+    -- finishmarker
+    local finish_marker_id = hl_range(bufnr, ANCESTOR_HL, pos.finish_marker-1, pos.finish_marker)
 
-    -- Labels will show the marker lines if available, otherwise generic
-    local curr_label_text = (lines[current_start + 1] or 'Current') .. ' (Current)'
-    local inc_label_text = (lines[incoming_end + 1] or 'Incoming') .. ' (Incoming)'
-
-    -- create extmarks
-    local curr_label_id = draw_section_label(bufnr, CURRENT_LABEL_HL, curr_label_text, current_start)
-    local curr_id = hl_range(bufnr, CURRENT_HL, current_start, current_end + 1)
-    local inc_id = hl_range(bufnr, INCOMING_HL, incoming_start, incoming_end + 1)
-    local inc_label_id = draw_section_label(bufnr, INCOMING_LABEL_HL, inc_label_text, incoming_end)
-
-    if not vim.tbl_isempty(pos.ancestor or {}) then
-      local ancestor_start = pos.ancestor.range_start
-      local ancestor_end = pos.ancestor.range_end
-      local ancestor_label = (lines[ancestor_start + 1] or 'Ancestor') .. ' (Base)'
-      local id = hl_range(bufnr, ANCESTOR_HL, ancestor_start + 1, ancestor_end + 1)
-      local label_id = draw_section_label(bufnr, ANCESTOR_LABEL_HL, ancestor_label, ancestor_start)
+    -- highlight regions
+    -- snapshot
+    if pos.snapshots ~= nil then
+      for _, snapshot_region in ipairs(pos.snapshots) do
+        local snapshot_region_id = hl_range(bufnr, DIFF_HL, snapshot_region.start-1, snapshot_region.finish)
+      end
+    end
+    -- base
+    if pos["base"] ~= nil then
+      if pos.base["start"] ~= nil and pos.base["finish"] ~= nil then
+        local base_region_id = hl_range(bufnr, CURRENT_HL, pos.base.start-1, pos.base.finish)
+      end
+    end
+    -- diff
+    if pos["diff"] ~= nil then
+      if pos.diff["start"] ~= nil and pos.diff["finish"] ~= nil then
+        local diff_region_id = hl_range(bufnr, CURRENT_HL, pos.diff.start-1, pos.diff.finish)
+      end
     end
   end
 end
@@ -203,10 +256,14 @@ local function set_highlights(user_hls)
   local current_color = get_hl(user_hls.current)
   local incoming_color = get_hl(user_hls.incoming)
   local ancestor_color = get_hl(user_hls.ancestor)
+  local snapshot_color = get_hl(user_hls.snapshot)
+  local base_color = get_hl(user_hls.base)
 
   local current_bg = current_color.background or DEFAULT_CURRENT_BG_COLOR
   local incoming_bg = incoming_color.background or DEFAULT_INCOMING_BG_COLOR
   local ancestor_bg = ancestor_color.background or DEFAULT_ANCESTOR_BG_COLOR
+  local snapshot_bg = snapshot_color.background or DEFAULT_SNAPSHOT_BG_COLOR
+  local base_bg = base_color.background or DEFAULT_BASE_BG_COLOR
 
   local function shade_color(col, amount)
     amount = amount or 60
@@ -224,13 +281,20 @@ local function set_highlights(user_hls)
   local current_label_bg = shade_color(current_bg, 60)
   local incoming_label_bg = shade_color(incoming_bg, 60)
   local ancestor_label_bg = shade_color(ancestor_bg, 60)
+  local snapshot_label_bg = shade_color(snapshot_bg, 60)
+  local base_label_bg = shade_color(base_bg, 60)
 
   api.nvim_set_hl(0, CURRENT_HL, { background = current_bg, bold = true, default = true })
   api.nvim_set_hl(0, INCOMING_HL, { background = incoming_bg, bold = true, default = true })
   api.nvim_set_hl(0, ANCESTOR_HL, { background = ancestor_bg, bold = true, default = true })
+  api.nvim_set_hl(0, DIFF_HL, { background = incoming_bg, bold = true, default = true })
+  api.nvim_set_hl(0, SNAPSHOT_HL, { background = snapshot_bg, bold = true, default = true })
+  api.nvim_set_hl(0, BASE_HL, { background = base_bg, bold = true, default = true })
   api.nvim_set_hl(0, CURRENT_LABEL_HL, { background = current_label_bg, default = true })
   api.nvim_set_hl(0, INCOMING_LABEL_HL, { background = incoming_label_bg, default = true })
   api.nvim_set_hl(0, ANCESTOR_LABEL_HL, { background = ancestor_label_bg, default = true })
+  api.nvim_set_hl(0, SNAPSHOT_LABEL_HL, { background = snapshot_label_bg, default = true })
+  api.nvim_set_hl(0, BASE_LABEL_HL, { background = base_label_bg, default = true })
 end
 
 -- Parse current buffer and highlight

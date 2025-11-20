@@ -1,11 +1,14 @@
-# ⚠️ plugin is broken right now
-
 # jj-conflict-highlight.nvim
 A plugin to visualise jujutsu conflicts in neovim
 
 This plugin is inspired by [git-conflict.nvim](https://github.com/akinsho/git-conflict.nvim)
 
 This Plugin focuses on the Highlight part. For more functionality use Plugins like (jj.nvim)[https://github.com/NicolasGB/jj.nvim]
+
+## Status
+Plugin should work for jj default conflict markers and jj snapshot conflict markers
+
+still early work
 
 ## Installation
 
