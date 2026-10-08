@@ -1,0 +1,129 @@
+*jj_conflict_highlight.txt*	Highlight Jujutsu conflict markers in Neovim
+
+Author: Spiegie
+License: Same as Neovim
+
+==============================================================================
+INTRODUCTION					    *jj-conflict-highlight-intro*
+
+jj-conflict-highlight.nvim highlights conflict markers produced by jj
+(and git style markers) directly in the buffer:
+
+- jj snapshot style markers (jj default):			>
+	<<<<<<< Conflict 1 of 1
+	+++++++ Contents of side #1
+	...
+	------- Contents of base
+	...
+	+++++++ Contents of side #2
+	...
+	>>>>>>> Conflict 1 of 1 ends
+<
+- jj diff style markers (`ui.conflict-marker-style = "diff"`):	>
+	<<<<<<< Conflict 1 of 1
+	%%%%%%% diff from: ...
+	...
+	+++++++ Contents of side #2
+	...
+	>>>>>>> Conflict 1 of 1 ends
+<
+- git style markers:					>
+	<<<<<<< HEAD
+	...
+	||||||| merged common ancestors
+	...
+	=======
+	...
+	>>>>>>> other-branch
+<
+Marker lines are highlighted with |JjConflictAncestor|, the content of each
+side with the group matching its role (see |jj-conflict-highlight-highlights|).
+
+The plugin focuses on highlighting only. For jj integration beyond that
+(status, commands, ...) see https://github.com/NicolasGB/jj.nvim
+
+==============================================================================
+USAGE						    *jj-conflict-highlight-usage*
+
+Call |setup()| from your configuration: >
+
+	require('jj_conflict_highlight').setup()
+
+Highlights are applied and refreshed automatically for the current buffer.
+A buffer is only re-parsed when its contents actually changed.
+
+------------------------------------------------------------------------------
+FUNCTIONS					    *jj-conflict-highlight-functions*
+
+setup({opts})					*jj-conflict-highlight-setup()*
+	Initialize the plugin. {opts} is an optional table with one key:
+	>
+		highlights  Map of role to source highlight group, see
+			    |jj-conflict-highlight-highlights|.
+	<
+	Example: >
+	require('jj_conflict_highlight').setup({
+	  highlights = { current = 'DiffText', incoming = 'DiffAdd' },
+	})
+
+highlight({bufnr})				*jj-conflict-highlight-highlight()*
+	Re-parse {bufnr} (default: current buffer) and (re)apply all
+	conflict highlights.
+
+clear({bufnr})					*jj-conflict-highlight-clear()*
+	Remove all conflict highlights from {bufnr} (default: current
+	buffer). The highlights stay off until the buffer contents change
+	again or |jj-conflict-highlight-highlight()| is called.
+
+==============================================================================
+HIGHLIGHTS				    *jj-conflict-highlight-highlights*
+
+Each highlight group derives its background from a source group (a built-in
+diff group by default) so the plugin blends in with the active colorscheme.
+If the source group has no background, a built-in fallback color is used.
+All groups are defined with `default = true`, so a colorscheme can override
+them directly. They are re-derived automatically after a colorscheme switch.
+
+JjConflictCurrent				   *JjConflictCurrent*
+	Base and diff regions of jj conflicts, the "ours" side of git
+	conflicts. Default source: DiffText.
+
+JjConflictIncoming				   *JjConflictIncoming*
+	The "theirs" side of git conflicts. Default source: DiffAdd.
+
+JjConflictAncestor				   *JjConflictAncestor*
+	All marker lines and the common ancestor of git conflicts.
+	Default source: DiffChange.
+
+JjConflictDiff					   *JjConflictDiff*
+	Snapshot regions (the jj conflict sides). Follows the incoming
+	source.
+
+JjConflictSnapshot				   *JjConflictSnapshot*
+	Reserved. Default source: DiffSnapshot (not a built-in group).
+
+JjConflictBase					   *JjConflictBase*
+	Reserved. Default source: DiffBase (not a built-in group).
+
+==============================================================================
+TESTING					    *jj-conflict-highlight-testing*
+
+The test suite runs headlessly: >
+
+	nvim --headless -l tests/test.lua
+
+It exits with a non-zero status when a test fails. To try the plugin against
+real conflicts, generate a test repository (requires the jj binary): >
+
+	scripts/create_conflict.sh
+
+The flake packages the plugin and provides apps to test it: >
+
+	nix run           " demo: conflicted jj repo in an isolated neovim
+	nix run .#test    " run the headless test suite
+	nix build .#neovim" neovim wrapper with the plugin installed
+
+Note that flakes only see files tracked by git, so new files must be
+`git add`-ed before building from the flake.
+
+ vim:tw=78:ts=8:noet:ft=help:norl:

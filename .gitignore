@@ -40,3 +40,7 @@ luac.out
 *.hex
 
 testrepo/
+
+# nix build results
+result
+result-*
