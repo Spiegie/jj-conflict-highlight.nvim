@@ -30,8 +30,11 @@ local function eq(actual, expected, msg)
   print('  actual:   ' .. inspect(actual))
 end
 
--- Split a multiline string into lines, keeping empty lines.
+-- Split a multiline string into lines, keeping empty lines. Long-bracket
+-- samples end with a newline before the closing bracket; drop it so the
+-- buffer does not gain a phantom empty last line.
 local function lines_of(s)
+  s = s:gsub('\n$', '')
   local lines = {}
   for line in (s .. '\n'):gmatch('(.-)\n') do
     lines[#lines + 1] = line
@@ -302,6 +305,40 @@ do
   api.nvim_buf_delete(bufnr, { force = true })
 end
 
+-- Regression test for issue #2: "removing the last line of a conflict
+-- breaks neovim". The old parser indexed lines[i + 1] after the start
+-- marker, which crashed the decoration provider on every redraw once the
+-- start marker became the last line of the buffer.
+do
+  local bufnr = make_buffer(lines_of([[
+text before
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
+apple
++++++++ Contents of side #2
+>>>>>>> Conflict 1 of 1 ends
+]]))
+  plugin.highlight(bufnr)
+  eq(#extmarks(bufnr), 5, 'issue #2: conflict at end of buffer is highlighted')
+
+  -- removing the last line (the finish marker) leaves an unterminated
+  -- conflict, which is ignored
+  api.nvim_buf_set_lines(bufnr, -2, -1, false, {})
+  plugin.highlight(bufnr)
+  eq(extmarks(bufnr), {}, 'issue #2: unterminated conflict is not highlighted')
+
+  -- removing lines until the start marker is the last line must not error
+  api.nvim_buf_set_lines(bufnr, 2, 5, false, {})
+  eq(
+    api.nvim_buf_get_lines(bufnr, -2, -1, false)[1],
+    '<<<<<<< Conflict 1 of 1',
+    'issue #2: start marker is the last line now'
+  )
+  plugin.highlight(bufnr)
+  eq(extmarks(bufnr), {}, 'issue #2: start marker as last line does not error')
+  api.nvim_buf_delete(bufnr, { force = true })
+end
+
 -- The decoration provider refreshes highlights on redraw, but only for
 -- buffers whose contents changed. Uses an internal API; skip when absent.
 if api.nvim__redraw then
@@ -329,6 +366,15 @@ if api.nvim__redraw then
   api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'resolved file' })
   api.nvim__redraw({ flush = true })
   eq(extmarks(bufnr), {}, 'provider clears highlights when conflicts are resolved')
+
+  -- issue #2: a start marker as the last line must not error on redraw
+  api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'text', '<<<<<<< conflict 1 of 1' })
+  api.nvim__redraw({ flush = true })
+  eq(extmarks(bufnr), {}, 'issue #2: start marker as last line does not error on redraw')
+
+  api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  api.nvim__redraw({ flush = true })
+  eq(#extmarks(bufnr), 8, 'provider re-highlights a restored conflict')
 
   plugin.clear(bufnr)
   api.nvim__redraw({ flush = true })

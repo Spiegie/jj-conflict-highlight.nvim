@@ -174,15 +174,25 @@ scripts/create_conflict.sh
 The flake packages the plugin and provides apps to test it:
 
 ```sh
+nix build .#      # build the plugin package (fails if it cannot be required)
 nix run           # demo: create a real conflicted jj repo and open it in an
                   # isolated neovim with only this plugin installed
 nix run .#test    # run the headless test suite
-nix develop       # dev shell with neovim, stylua and jj
+nix develop       # dev shell with neovim, stylua, jj and lua-language-server
 ```
 
-`nix build .#neovim` builds a neovim wrapper with the plugin installed and
-set up, the way a user would get it. The build fails if the plugin cannot be
-required (`nvimRequireCheck`).
+Use it as a flake input (home-manager / NixOS):
+
+```nix
+inputs.jj-conflict-highlight = {
+  url = "github:Spiegie/jj-conflict-highlight.nvim";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+# …
+programs.neovim.plugins = [
+  inputs.jj-conflict-highlight.packages.${system}.default
+];
+```
 
 Note that flakes only see files tracked by git: `git add` new files before
 building, and expect a `dirty tree` warning while changes are uncommitted.
